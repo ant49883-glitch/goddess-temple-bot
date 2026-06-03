@@ -1,0 +1,20 @@
+# Environment - NEVER commit this
+.env
+
+# Database (Railway uses ephemeral storage, see README)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
