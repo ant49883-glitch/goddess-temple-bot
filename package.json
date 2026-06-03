@@ -11,7 +11,6 @@
     "deploy": "node deploy-commands.js"
   },
   "dependencies": {
-    "better-sqlite3": "^9.4.3",
     "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
     "pg": "^8.11.5"
