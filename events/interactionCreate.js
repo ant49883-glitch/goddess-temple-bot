@@ -117,7 +117,8 @@ module.exports = {
         priority,
       });
 
-      const { customFieldsMap } = require("../commands/ticketCustomize");
+      const ticketCustomize = require("../commands/ticketCustomize");
+      const customFieldsMap = ticketCustomize.customFieldsMap;
       const customFields = customFieldsMap.get(guild.id) || config.ticketFields;
 
       const embed = buildTicketOpenEmbed({ user: member.user, ticketNumber: ticketNum, priority, customFields });
