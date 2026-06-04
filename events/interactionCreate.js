@@ -37,11 +37,11 @@ module.exports = {
     if (!interaction.isButton()) return;
     const { customId, guild, member, channel } = interaction;
 
-    // ── OPEN TICKET (general or priority) ───────────────────
+    // ── OPEN TICKET ─────────────────────────────────────────
     if (customId === "ticket_open_general" || customId === "ticket_open_priority") {
       const wantsPriority = customId === "ticket_open_priority";
 
-      // Priority button: only whitelisted users can open
+      // Priority: whitelist only
       if (wantsPriority) {
         const whitelisted = await db.isWhitelisted(guild.id, member.id);
         if (!whitelisted) {
@@ -54,23 +54,21 @@ module.exports = {
 
       const openTickets = await db.getOpenTicketsByUser(guild.id, member.id);
       const priority = wantsPriority;
-      const limit = wantsPriority ? config.maxTicketsPerUserPriority : config.maxTicketsPerUser;
+      const limit = priority ? config.maxTicketsPerUserPriority : config.maxTicketsPerUser;
 
       if (openTickets.length >= limit) {
         return interaction.reply({
-          content: `You already have an open ticket. Please wait for it to be resolved before opening another.`,
+          content: "You already have an open ticket. Please wait for it to be resolved before opening another.",
           ephemeral: true,
         });
       }
 
-      await interaction.deferReply({ ephemeral: true });
+      // Acknowledge immediately so Discord doesn't time out
+      await interaction.reply({ content: "Creating your ticket...", ephemeral: true });
 
       const template = priority ? config.priorityTicketChannelName : config.ticketChannelName;
       const ticketNum = await db.getNextTicketNumber(guild.id);
-      const channelName = buildChannelName(template, {
-        username: member.user.username,
-        id: ticketNum,
-      });
+      const channelName = buildChannelName(template, { username: member.user.username, id: ticketNum });
 
       const permOverwrites = [
         { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
@@ -97,11 +95,16 @@ module.exports = {
         });
       }
 
+      // Get saved category if set
+      const { categoryMap } = require("../commands/ticketCategory");
+      const parentId = categoryMap.get(guild.id) || null;
+
       let ticketChannel;
       try {
         ticketChannel = await guild.channels.create({
           name: channelName,
           type: ChannelType.GuildText,
+          parent: parentId,
           topic: `${priority ? "PRIORITY | " : ""}Ticket for ${member.user.tag}`,
           permissionOverwrites: permOverwrites,
         });
@@ -117,9 +120,9 @@ module.exports = {
         priority,
       });
 
+      // Get custom fields
       const ticketCustomize = require("../commands/ticketCustomize");
-      const customFieldsMap = ticketCustomize.customFieldsMap;
-      const customFields = customFieldsMap.get(guild.id) || config.ticketFields;
+      const customFields = ticketCustomize.customFieldsMap.get(guild.id) || config.ticketFields;
 
       const embed = buildTicketOpenEmbed({ user: member.user, ticketNumber: ticketNum, priority, customFields });
       const controlRow = buildTicketControlRow();
@@ -127,12 +130,16 @@ module.exports = {
       const welcomeText = config.ticketOpenMessage.replace("{user}", `<@${member.id}>`);
       const staffMention = config.staffRoleIds.map((id) => `<@&${id}>`).join(" ");
 
-      const openMsg = await ticketChannel.send({
-        content: (staffMention ? `${staffMention}\n` : "") + welcomeText,
-        embeds: [embed],
-        components: [controlRow],
-      });
-      try { await openMsg.pin(); } catch {}
+      try {
+        const openMsg = await ticketChannel.send({
+          content: (staffMention ? `${staffMention}\n` : "") + welcomeText,
+          embeds: [embed],
+          components: [controlRow],
+        });
+        try { await openMsg.pin(); } catch {}
+      } catch (err) {
+        console.error("Failed to send ticket embed:", err);
+      }
 
       return interaction.editReply({ content: `Your ticket has been created: ${ticketChannel}` });
     }
