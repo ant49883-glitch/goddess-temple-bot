@@ -4,7 +4,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder,
 } = require("discord.js");
 const config = require("../config/config");
 const db = require("../utils/database");
@@ -14,14 +13,13 @@ const {
   buildTicketOpenEmbed,
   buildTicketControlRow,
   isStaff,
-  buildTranscript,
 } = require("../utils/ticketHelpers");
 
 module.exports = {
   name: "interactionCreate",
 
   async execute(interaction, client) {
-    // ── Slash commands ────────────────────────────────────────
+    // ── Slash commands ──────────────────────────────────────
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
       if (!command) return;
@@ -29,69 +27,53 @@ module.exports = {
         await command.execute(interaction);
       } catch (err) {
         console.error("Command error:", err);
-        const msg = { content: "❌ An error occurred.", ephemeral: true };
-        if (interaction.replied || interaction.deferred) {
-          await interaction.followUp(msg);
-        } else {
-          await interaction.reply(msg);
-        }
+        const msg = { content: "An error occurred.", ephemeral: true };
+        if (interaction.replied || interaction.deferred) await interaction.followUp(msg);
+        else await interaction.reply(msg);
       }
       return;
     }
 
-    // ── Button interactions ───────────────────────────────────
     if (!interaction.isButton()) return;
-
     const { customId, guild, member, channel } = interaction;
 
-    // ── OPEN TICKET ──────────────────────────────────────────
-    if (customId.startsWith("ticket_open_")) {
-      const categoryId = customId.replace("ticket_open_", "");
-      const cat = config.ticketCategories.find((c) => c.id === categoryId);
+    // ── OPEN TICKET (general or priority) ───────────────────
+    if (customId === "ticket_open_general" || customId === "ticket_open_priority") {
+      const wantsPriority = customId === "ticket_open_priority";
 
-      if (!cat) {
-        return interaction.reply({
-          content: "❌ Unknown ticket category.",
-          ephemeral: true,
-        });
+      // Priority button: only whitelisted users can open
+      if (wantsPriority) {
+        const whitelisted = await db.isWhitelisted(guild.id, member.id);
+        if (!whitelisted) {
+          return interaction.reply({
+            content: "You are not whitelisted for priority tickets. Contact a staff member if you believe this is an error.",
+            ephemeral: true,
+          });
+        }
       }
 
-      // Check open ticket limit
-      const openTickets = db.getOpenTicketsByUser(guild.id, member.id);
-      const priority = await isPriorityUser(guild, member);
-      const limit = priority
-        ? config.maxTicketsPerUserPriority
-        : config.maxTicketsPerUser;
+      const openTickets = await db.getOpenTicketsByUser(guild.id, member.id);
+      const priority = wantsPriority;
+      const limit = wantsPriority ? config.maxTicketsPerUserPriority : config.maxTicketsPerUser;
 
       if (openTickets.length >= limit) {
         return interaction.reply({
-          content: `❌ You already have ${openTickets.length} open ticket(s). Please wait for it to be resolved before opening another.`,
+          content: `You already have an open ticket. Please wait for it to be resolved before opening another.`,
           ephemeral: true,
         });
       }
 
       await interaction.deferReply({ ephemeral: true });
 
-      // Pick channel name template
-      const template = priority
-        ? config.priorityTicketChannelName
-        : config.ticketChannelName;
-
-      // Get next ticket number (temporary — we need to create first)
-      const tempNum = db.getNextTicketNumber(guild.id);
-      // Roll back by creating with a fake channel ID first — instead we pass temp
+      const template = priority ? config.priorityTicketChannelName : config.ticketChannelName;
+      const ticketNum = await db.getNextTicketNumber(guild.id);
       const channelName = buildChannelName(template, {
         username: member.user.username,
-        id: tempNum,
-        category: categoryId,
+        id: ticketNum,
       });
 
-      // Collect staff role permission overwrites
       const permOverwrites = [
-        {
-          id: guild.roles.everyone,
-          deny: [PermissionFlagsBits.ViewChannel],
-        },
+        { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
         {
           id: member.id,
           allow: [
@@ -102,7 +84,6 @@ module.exports = {
           ],
         },
       ];
-
       for (const roleId of config.staffRoleIds) {
         permOverwrites.push({
           id: roleId,
@@ -116,173 +97,92 @@ module.exports = {
         });
       }
 
-      // If priority, add channel topic so it stands out
       let ticketChannel;
       try {
         ticketChannel = await guild.channels.create({
           name: channelName,
           type: ChannelType.GuildText,
-          topic: priority
-            ? `⭐ PRIORITY | ${cat.label} ticket for ${member.user.tag}`
-            : `${cat.label} ticket for ${member.user.tag}`,
+          topic: `${priority ? "PRIORITY | " : ""}Ticket for ${member.user.tag}`,
           permissionOverwrites: permOverwrites,
         });
       } catch (err) {
-        return interaction.editReply({
-          content: `❌ Could not create ticket channel: ${err.message}`,
-        });
+        return interaction.editReply({ content: `Could not create ticket channel: ${err.message}` });
       }
 
-      // Register in DB (ticket number already incremented above)
-      db.createTicket({
+      await db.createTicket({
         channelId: ticketChannel.id,
         guildId: guild.id,
         userId: member.id,
-        category: categoryId,
+        category: priority ? "priority" : "general",
         priority,
       });
 
-      // Build welcome embed
-      const embed = buildTicketOpenEmbed({
-        user: member.user,
-        category: categoryId,
-        priority,
-        ticketNumber: tempNum,
-      });
+      const { customFieldsMap } = require("../commands/ticketCustomize");
+      const customFields = customFieldsMap.get(guild.id) || config.ticketFields;
 
-      // Check for custom welcome message
-      const ticketCustomize = require("../commands/ticketCustomize");
-      const customMsg = ticketCustomize.customMessages.get(categoryId);
+      const embed = buildTicketOpenEmbed({ user: member.user, ticketNumber: ticketNum, priority, customFields });
+      const controlRow = buildTicketControlRow();
 
-      let welcomeText;
-      if (customMsg) {
-        welcomeText = customMsg.replace("{user}", `<@${member.id}>`);
-      } else {
-        welcomeText = config.ticketOpenMessage
-          .replace("{user}", `<@${member.id}>`)
-          .replace("{category}", cat.label)
-          .replace("{priority}", priority ? "⭐ **Priority Ticket**\n\n" : "");
-      }
-
-      const controlRow = buildTicketControlRow(ticketChannel.id);
-
-      // If priority, ping staff
-      let staffMention = "";
-      if (config.staffRoleIds.length) {
-        staffMention = config.staffRoleIds.map((id) => `<@&${id}>`).join(" ");
-      }
+      const welcomeText = config.ticketOpenMessage.replace("{user}", `<@${member.id}>`);
+      const staffMention = config.staffRoleIds.map((id) => `<@&${id}>`).join(" ");
 
       const openMsg = await ticketChannel.send({
-        content: staffMention
-          ? `${staffMention} — new ${priority ? "⭐ priority " : ""}ticket!`
-          : undefined,
+        content: (staffMention ? `${staffMention}\n` : "") + welcomeText,
         embeds: [embed],
         components: [controlRow],
       });
-
-      // Pin the opening message
       try { await openMsg.pin(); } catch {}
 
-      return interaction.editReply({
-        content: `✅ Your ticket has been created: ${ticketChannel}`,
-      });
+      return interaction.editReply({ content: `Your ticket has been created: ${ticketChannel}` });
     }
 
-    // ── CLAIM (button) ────────────────────────────────────────
+    // ── CLAIM ────────────────────────────────────────────────
     if (customId === "ticket_claim") {
-      if (!isStaff(member)) {
-        return interaction.reply({ content: "❌ Staff only.", ephemeral: true });
-      }
-      const ticket = db.getTicket(channel.id);
-      if (!ticket) return;
-      db.claimTicket(channel.id, member.id);
-      return interaction.reply({
-        content: `🙋 ${member} has **claimed** this ticket.`,
-      });
+      if (!isStaff(member)) return interaction.reply({ content: "Staff only.", ephemeral: true });
+      await db.claimTicket(channel.id, member.id);
+      return interaction.reply({ content: `${member} has claimed this ticket.` });
     }
 
-    // ── CLOSE (button) ────────────────────────────────────────
+    // ── CLOSE ────────────────────────────────────────────────
     if (customId === "ticket_close") {
-      const ticket = db.getTicket(channel.id);
+      const ticket = await db.getTicket(channel.id);
       if (!ticket) return;
-
       if (!isStaff(member) && ticket.user_id !== member.id) {
-        return interaction.reply({
-          content: "❌ Only staff or the ticket opener can close this.",
-          ephemeral: true,
-        });
+        return interaction.reply({ content: "Only staff or the ticket opener can close this.", ephemeral: true });
       }
-
-      // Confirm row
       const confirmRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("ticket_close_confirm")
-          .setLabel("Yes, close it")
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId("ticket_close_cancel")
-          .setLabel("Cancel")
-          .setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("ticket_close_confirm").setLabel("Close Ticket").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId("ticket_close_cancel").setLabel("Cancel").setStyle(ButtonStyle.Secondary)
       );
-
-      return interaction.reply({
-        content: config.closeConfirmMessage,
-        components: [confirmRow],
-        ephemeral: true,
-      });
+      return interaction.reply({ content: config.closeConfirmMessage, components: [confirmRow], ephemeral: true });
     }
 
-    // ── CLOSE CONFIRM ─────────────────────────────────────────
+    // ── CLOSE CONFIRM ────────────────────────────────────────
     if (customId === "ticket_close_confirm") {
-      const ticket = db.getTicket(channel.id);
+      const ticket = await db.getTicket(channel.id);
       if (!ticket) return;
-
-      await interaction.update({ content: "🔒 Closing ticket...", components: [] });
-
+      await interaction.update({ content: "Closing ticket...", components: [] });
       if (config.saveTranscripts && config.logChannelId) {
         const { sendTranscript } = require("../commands/ticket");
         await sendTranscript(channel, ticket, guild, "Closed via button");
       }
-
-      db.closeTicket(channel.id, member.id);
-
+      await db.closeTicket(channel.id, member.id);
       if (config.archiveCategoryId) {
         try {
-          await channel.setParent(config.archiveCategoryId, {
-            lockPermissions: false,
-          });
-          await channel.permissionOverwrites.edit(ticket.user_id, {
-            ViewChannel: false,
-          });
+          await channel.setParent(config.archiveCategoryId, { lockPermissions: false });
+          await channel.permissionOverwrites.edit(ticket.user_id, { ViewChannel: false });
           await channel.setName(`closed-${channel.name}`);
-          await channel.send({ content: "🔒 Ticket closed and archived." });
+          await channel.send({ content: "Ticket closed and archived." });
         } catch {}
       } else {
-        await channel.send({ content: "🔒 Ticket closed. Channel deletes in 5s." });
+        await channel.send({ content: "Ticket closed. This channel will be deleted in 5 seconds." });
         setTimeout(() => channel.delete().catch(() => {}), 5000);
       }
     }
 
-    // ── CLOSE CANCEL ──────────────────────────────────────────
+    // ── CLOSE CANCEL ─────────────────────────────────────────
     if (customId === "ticket_close_cancel") {
-      return interaction.update({
-        content: "✅ Close cancelled.",
-        components: [],
-      });
-    }
-
-    // ── TRANSCRIPT (button) ───────────────────────────────────
-    if (customId === "ticket_transcript") {
-      if (!isStaff(member)) {
-        return interaction.reply({ content: "❌ Staff only.", ephemeral: true });
-      }
-      const ticket = db.getTicket(channel.id);
-      if (!ticket) return;
-
-      await interaction.deferReply({ ephemeral: true });
-      const { sendTranscript } = require("../commands/ticket");
-      await sendTranscript(channel, ticket, guild, "Manual button save");
-      return interaction.editReply({ content: "✅ Transcript saved to log channel." });
+      return interaction.update({ content: "Cancelled.", components: [] });
     }
   },
 };
